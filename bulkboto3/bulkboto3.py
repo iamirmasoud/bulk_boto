@@ -27,6 +27,10 @@ def single_download(input_tuple):
     bucket, download_path = input_tuple
     bucket.download_file(download_path.storage_path, download_path.local_path)
 
+def single_delete(input_tuple):
+    bucket, obj = input_tuple
+    bucket.delete_objects(Delete={"Objects": [{"Key": obj.key}]})
+
 
 class BulkBoto3:
     def __init__(
@@ -55,7 +59,7 @@ class BulkBoto3:
                 config=Config(
                     signature_version="s3v4",
                     max_pool_connections=max_pool_connections,
-                ),
+                )
             )
         except Exception as e:
             logger.exception(f"Cannot connect to object storage. {e}")
@@ -310,4 +314,52 @@ class BulkBoto3:
             )
         except Exception as e:
             logger.exception(f"Cannot download files. {e}")
+            raise
+    
+    def delete_dir_from_storage(self, bucket_name: str, storage_dir: str, n_threads: int = mp.cpu_count() * 7) -> None:
+        """
+        Delete a whole directory with its structure (subdirectories and files) from the object storage.
+        :param bucket_name: Name of the bucket.
+        :param storage_dir: Base directory on the object storage to delete.
+        :param n_threads: Number of threads to use for parallel deletion. Set to 1 for non-parallel mode.
+        """
+        logger.info(f"Starting deletion of directory '{storage_dir}' in bucket '{bucket_name}' with {n_threads} threads.")
+
+        try:
+            bucket = self._get_bucket(bucket_name)
+            # List all objects under the specified directory
+            objects_to_delete = list(bucket.objects.filter(Prefix=storage_dir))
+
+            # Check if the directory is empty
+            if not objects_to_delete:
+                logger.warning(f"No files found at '{storage_dir}' to delete.")
+                return
+
+            start_time = time.time()
+
+            # Perform parallel deletion using threads
+            if n_threads > 1:
+                with ThreadPool(n_threads) as pool:
+                    list(
+                        tqdm(
+                            pool.imap(
+                                single_delete,
+                                zip(itertools.repeat(bucket), objects_to_delete),
+                            ),
+                            total=len(objects_to_delete),
+                            disable=not self.verbose,
+                        )
+                    )
+            # Non-parallel mode (n_threads = 1)
+            else:
+                for obj in tqdm(objects_to_delete, disable=not self.verbose):
+                    bucket.delete_objects(Delete={"Objects": [{"Key": obj.key}]})
+
+            logger.info(
+                f"Successfully deleted directory '{storage_dir}' and its contents from bucket '{bucket_name}' "
+                f"in {(time.time() - start_time):.2f} seconds."
+            )
+        
+        except Exception as e:
+            logger.exception(f"Failed to delete directory '{storage_dir}' from bucket '{bucket_name}'. {e}")
             raise
